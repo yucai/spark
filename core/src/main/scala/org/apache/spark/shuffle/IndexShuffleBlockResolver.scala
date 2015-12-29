@@ -135,7 +135,9 @@ private[spark] class IndexShuffleBlockResolver(
       shuffleId: Int,
       mapId: Int,
       lengths: Array[Long],
-      dataTmp: File): Unit = {
+      dataFileTmp: File,
+      // SPARK-12196, in hierarchy store, the getDataFile could return different value
+      dataFile: File): Unit = {
     val indexFile = getIndexFile(shuffleId, mapId)
     val indexTmp = Utils.tempFileWith(indexFile)
     val out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(indexTmp)))
@@ -151,7 +153,6 @@ private[spark] class IndexShuffleBlockResolver(
       out.close()
     }
 
-    val dataFile = getDataFile(shuffleId, mapId)
     // There is only one IndexShuffleBlockResolver per executor, this synchronization make sure
     // the following check and rename are atomic.
     synchronized {
@@ -160,8 +161,8 @@ private[spark] class IndexShuffleBlockResolver(
         // Another attempt for the same task has already written our map outputs successfully,
         // so just use the existing partition lengths and delete our temporary map outputs.
         System.arraycopy(existingLengths, 0, lengths, 0, lengths.length)
-        if (dataTmp != null && dataTmp.exists()) {
-          dataTmp.delete()
+        if (dataFileTmp != null && dataFileTmp.exists()) {
+          dataFileTmp.delete()
         }
         indexTmp.delete()
       } else {
@@ -170,14 +171,14 @@ private[spark] class IndexShuffleBlockResolver(
         if (indexFile.exists()) {
           indexFile.delete()
         }
-        if (dataFile.exists()) {
+        if (dataFile != null && dataFile.exists()) {
           dataFile.delete()
         }
         if (!indexTmp.renameTo(indexFile)) {
           throw new IOException("fail to rename file " + indexTmp + " to " + indexFile)
         }
-        if (dataTmp != null && dataTmp.exists() && !dataTmp.renameTo(dataFile)) {
-          throw new IOException("fail to rename file " + dataTmp + " to " + dataFile)
+        if (dataFileTmp != null && dataFileTmp.exists() && !dataFileTmp.renameTo(dataFile)) {
+          throw new IOException("fail to rename file " + dataFileTmp + " to " + dataFile)
         }
       }
     }
