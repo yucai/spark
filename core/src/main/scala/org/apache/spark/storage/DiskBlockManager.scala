@@ -124,7 +124,7 @@ private[spark] class DiskBlockManager(blockManager: BlockManager, conf: SparkCon
         }
       }
 
-      if (availableFile != null) {
+      if (availableFile == null) {
         throw new IOException(s"No enough disk space.")
       }
       availableFile
