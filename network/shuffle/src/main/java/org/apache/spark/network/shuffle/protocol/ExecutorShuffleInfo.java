@@ -35,29 +35,39 @@ public class ExecutorShuffleInfo implements Encodable {
   public final int subDirsPerLocalDir;
   /** Shuffle manager (SortShuffleManager or HashShuffleManager) that the executor is using. */
   public final String shuffleManager;
+  /** Hierarchy store layers. */
+  public final HierarchyLayerInfo[] availableLayers;
+
+  public ExecutorShuffleInfo(String[] localDirs, int subDirsPerLocalDir, String shuffleManager) {
+    this(localDirs, subDirsPerLocalDir, shuffleManager, null);
+  }
 
   @JsonCreator
   public ExecutorShuffleInfo(
       @JsonProperty("localDirs") String[] localDirs,
       @JsonProperty("subDirsPerLocalDir") int subDirsPerLocalDir,
-      @JsonProperty("shuffleManager") String shuffleManager) {
+      @JsonProperty("shuffleManager") String shuffleManager,
+      @JsonProperty("availableLayers") HierarchyLayerInfo[] availableLayers) {
     this.localDirs = localDirs;
     this.subDirsPerLocalDir = subDirsPerLocalDir;
     this.shuffleManager = shuffleManager;
+    this.availableLayers = availableLayers;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(subDirsPerLocalDir, shuffleManager) * 41 + Arrays.hashCode(localDirs);
+    return (Objects.hashCode(subDirsPerLocalDir, shuffleManager) * 41
+            + Arrays.hashCode(localDirs)) * 41 + Arrays.hashCode(availableLayers);
   }
 
   @Override
   public String toString() {
     return Objects.toStringHelper(this)
-      .add("localDirs", Arrays.toString(localDirs))
-      .add("subDirsPerLocalDir", subDirsPerLocalDir)
-      .add("shuffleManager", shuffleManager)
-      .toString();
+            .add("localDirs", Arrays.toString(localDirs))
+            .add("subDirsPerLocalDir", subDirsPerLocalDir)
+            .add("shuffleManager", shuffleManager)
+            .add("availableLayers", Arrays.toString(availableLayers))
+            .toString();
   }
 
   @Override
@@ -65,17 +75,23 @@ public class ExecutorShuffleInfo implements Encodable {
     if (other != null && other instanceof ExecutorShuffleInfo) {
       ExecutorShuffleInfo o = (ExecutorShuffleInfo) other;
       return Arrays.equals(localDirs, o.localDirs)
-        && Objects.equal(subDirsPerLocalDir, o.subDirsPerLocalDir)
-        && Objects.equal(shuffleManager, o.shuffleManager);
+              && Objects.equal(subDirsPerLocalDir, o.subDirsPerLocalDir)
+              && Objects.equal(shuffleManager, o.shuffleManager)
+              && Arrays.equals(availableLayers, o.availableLayers);
     }
     return false;
   }
 
   @Override
   public int encodedLength() {
-    return Encoders.StringArrays.encodedLength(localDirs)
-        + 4 // int
-        + Encoders.Strings.encodedLength(shuffleManager);
+    int totalLength = Encoders.StringArrays.encodedLength(localDirs)
+            + 4 // int
+            + Encoders.Strings.encodedLength(shuffleManager)
+            + 4;
+    if (availableLayers != null)
+      for (HierarchyLayerInfo layer : availableLayers)
+        totalLength += layer.encodedLength();
+    return totalLength;
   }
 
   @Override
@@ -83,12 +99,28 @@ public class ExecutorShuffleInfo implements Encodable {
     Encoders.StringArrays.encode(buf, localDirs);
     buf.writeInt(subDirsPerLocalDir);
     Encoders.Strings.encode(buf, shuffleManager);
+    if (availableLayers != null) {
+      buf.writeInt(availableLayers.length);
+      for (HierarchyLayerInfo layer : availableLayers) {
+        layer.encode(buf);
+      }
+    } else {
+      buf.writeInt(0);
+    }
   }
 
   public static ExecutorShuffleInfo decode(ByteBuf buf) {
     String[] localDirs = Encoders.StringArrays.decode(buf);
     int subDirsPerLocalDir = buf.readInt();
     String shuffleManager = Encoders.Strings.decode(buf);
-    return new ExecutorShuffleInfo(localDirs, subDirsPerLocalDir, shuffleManager);
+    HierarchyLayerInfo[] availableLayers = null;
+    int numLayers = buf.readInt();
+    if (numLayers != 0) {
+      availableLayers = new HierarchyLayerInfo[numLayers];
+      for (int i = 0; i < numLayers; i++) {
+        availableLayers[i] = HierarchyLayerInfo.decode(buf);
+      }
+    }
+    return new ExecutorShuffleInfo(localDirs, subDirsPerLocalDir, shuffleManager, availableLayers);
   }
 }

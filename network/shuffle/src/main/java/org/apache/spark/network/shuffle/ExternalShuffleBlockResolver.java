@@ -30,6 +30,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Charsets;
 import com.google.common.base.Objects;
 import com.google.common.collect.Maps;
+import org.apache.spark.network.shuffle.protocol.HierarchyLayerInfo;
 import org.fusesource.leveldbjni.JniDBFactory;
 import org.fusesource.leveldbjni.internal.NativeDB;
 import org.iq80.leveldb.DB;
@@ -256,7 +257,7 @@ public class ExternalShuffleBlockResolver {
    * This logic is from FileShuffleBlockResolver.
    */
   private ManagedBuffer getHashBasedShuffleBlockData(ExecutorShuffleInfo executor, String blockId) {
-    File shuffleFile = getFile(executor.localDirs, executor.subDirsPerLocalDir, blockId);
+    File shuffleFile = getFile(executor, blockId);
     return new FileSegmentManagedBuffer(conf, shuffleFile, 0, shuffleFile.length());
   }
 
@@ -267,8 +268,7 @@ public class ExternalShuffleBlockResolver {
    */
   private ManagedBuffer getSortBasedShuffleBlockData(
     ExecutorShuffleInfo executor, int shuffleId, int mapId, int reduceId) {
-    File indexFile = getFile(executor.localDirs, executor.subDirsPerLocalDir,
-      "shuffle_" + shuffleId + "_" + mapId + "_0.index");
+    File indexFile = getFile(executor, "shuffle_" + shuffleId + "_" + mapId + "_0.index");
 
     DataInputStream in = null;
     try {
@@ -278,8 +278,7 @@ public class ExternalShuffleBlockResolver {
       long nextOffset = in.readLong();
       return new FileSegmentManagedBuffer(
         conf,
-        getFile(executor.localDirs, executor.subDirsPerLocalDir,
-          "shuffle_" + shuffleId + "_" + mapId + "_0.data"),
+        getFile(executor, "shuffle_" + shuffleId + "_" + mapId + "_0.data"),
         offset,
         nextOffset - offset);
     } catch (IOException e) {
@@ -291,16 +290,49 @@ public class ExternalShuffleBlockResolver {
     }
   }
 
+  @VisibleForTesting
+  static File getFile(String[] storageDirs, int subDirsPerLocalDir, String filename) {
+    int hash = JavaUtils.nonNegativeHash(filename);
+    String localDir = storageDirs[hash % storageDirs.length];
+    int subDirId = (hash / storageDirs.length) % subDirsPerLocalDir;
+    return new File(new File(localDir, String.format("%02x", subDirId)), filename);
+  }
+
   /**
    * Hashes a filename into the corresponding local directory, in a manner consistent with
-   * Spark's DiskBlockManager.getFile().
+   * Spark's DiskBlockManager.hashAllocator().
    */
-  @VisibleForTesting
-  static File getFile(String[] localDirs, int subDirsPerLocalDir, String filename) {
-    int hash = JavaUtils.nonNegativeHash(filename);
-    String localDir = localDirs[hash % localDirs.length];
-    int subDirId = (hash / localDirs.length) % subDirsPerLocalDir;
-    return new File(new File(localDir, String.format("%02x", subDirId)), filename);
+  static File hashAllocator(ExecutorShuffleInfo executor, String filename) {
+    return getFile(executor.localDirs, executor.subDirsPerLocalDir, filename);
+  }
+
+  /**
+   * Looks up a file by hierarchy way in different speed storage devices, in a manner consistent with
+   * Spark's DiskBlockManager#HierarchyAllocator.
+   */
+  static File hierarchyAllocator(ExecutorShuffleInfo executor, String filename) {
+    File availableFile = null;
+    for (HierarchyLayerInfo layer : executor.availableLayers) {
+      File file = getFile(layer.dirs, executor.subDirsPerLocalDir, filename);
+      if (file.exists()) return file;
+
+      if (availableFile == null && file.getParentFile().getUsableSpace() >= layer.threshold) {
+        availableFile = file;
+      }
+    }
+
+    assert(availableFile != null);
+    return availableFile;
+  }
+
+  static File getFile(ExecutorShuffleInfo executor, String filename) {
+    if (executor.availableLayers != null) {
+      logger.info("Hierarchy allocator for blocks is enabled");
+      return hierarchyAllocator(executor, filename);
+    } else {
+      logger.info("Hash allocator for blocks is enabled");
+      return hashAllocator(executor, filename);
+    }
   }
 
   void close() {
