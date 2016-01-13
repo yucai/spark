@@ -36,7 +36,7 @@ import org.apache.spark.network._
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.netty.SparkTransportConf
 import org.apache.spark.network.shuffle.ExternalShuffleClient
-import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo
+import org.apache.spark.network.shuffle.protocol.{ExecutorShuffleInfo, HierarchyLayerInfo}
 import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.serializer.{Serializer, SerializerInstance}
 import org.apache.spark.shuffle.ShuffleManager
@@ -197,10 +197,19 @@ private[spark] class BlockManager(
 
   private def registerWithExternalShuffleServer() {
     logInfo("Registering executor with local external shuffle service.")
+    val availableLayers = diskBlockManager.fileAllocator match {
+      case hsAllocator: diskBlockManager.HierarchyAllocator =>
+        hsAllocator.getLayers.map(
+          layer => new HierarchyLayerInfo(layer.key, layer.threshold, layer.dirs.map(_.toString))
+        )
+      case _ => null
+    }
     val shuffleConfig = new ExecutorShuffleInfo(
       diskBlockManager.localDirs.map(_.toString),
       diskBlockManager.subDirsPerLocalDir,
-      shuffleManager.shortName)
+      shuffleManager.shortName,
+      diskBlockManager.fileAllocator.name,
+      availableLayers)
 
     val MAX_ATTEMPTS = 3
     val SLEEP_TIME_SECS = 5

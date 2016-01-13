@@ -53,7 +53,9 @@ private[spark] class DiskBlockManager(blockManager: BlockManager, conf: SparkCon
 
   private val shutdownHook = addShutdownHook()
 
-  private abstract class FileAllocationStrategy {
+  private[spark] abstract class FileAllocationStrategy {
+    def name: String
+
     def apply(filename: String): File
 
     protected def getFile(filename: String, storageDirs: Array[File]): File = {
@@ -85,14 +87,20 @@ private[spark] class DiskBlockManager(blockManager: BlockManager, conf: SparkCon
 
   /** Looks up a file by hashing it into one of our local subdirectories. */
   // This method should be kept in sync with
-  // org.apache.spark.network.shuffle.ExternalShuffleBlockResolver#getFile().
-  private object hashAllocator extends FileAllocationStrategy {
+  // org.apache.spark.network.shuffle.ExternalShuffleBlockResolver#getFileHash().
+  private[spark] object hashAllocator extends FileAllocationStrategy {
+    override def name: String = "HashAllocator"
+
     def apply(filename: String): File = getFile(filename, localDirs)
   }
 
   /** Looks up a file by hierarchy way in different speed storage devices. */
+  // This method should be kept in sync with
+  // org.apache.spark.network.shuffle.ExternalShuffleBlockResolver#getFileHierarchy().
   private val hierarchyStore = conf.getOption("spark.storage.hierarchyStore")
-  private class HierarchyAllocator extends FileAllocationStrategy {
+  private[spark] class HierarchyAllocator extends FileAllocationStrategy {
+    override def name: String = "HierarchyAllocator"
+
     case class LayerInfo(key: String, threshold: Long, dirs: Array[File])
     val hsSpecs: Array[(String, Long)] =
       // e.g.: hierarchyStore = "ssd 200GB, hdd 100GB"
@@ -105,13 +113,15 @@ private[spark] class DiskBlockManager(blockManager: BlockManager, conf: SparkCon
     )
     val lastLayerDirs = localDirs.filter(dir => !hsLayers.exists(_.dirs.contains(dir)))
     val allLayers: Array[LayerInfo] = hsLayers :+
-      LayerInfo("Last Storage", 10.toLong, lastLayerDirs)
+      LayerInfo("Last Storage", (1 << 30).toLong * 5, lastLayerDirs)
     val finalLayers: Array[LayerInfo] = allLayers.filter(_.dirs.nonEmpty)
     logInfo("Hierarchy store info:")
     for (layer <- finalLayers) {
       logInfo("Layer: %s, Threshold: %s".format(layer.key, Utils.bytesToString(layer.threshold)))
       layer.dirs.foreach { dir => logInfo("\t%s".format(dir.getCanonicalPath)) }
     }
+
+    def getLayers: Array[LayerInfo] = finalLayers
 
     def apply(filename: String): File = {
       var availableFile: File = null
@@ -131,8 +141,8 @@ private[spark] class DiskBlockManager(blockManager: BlockManager, conf: SparkCon
     }
   }
 
-  private val fileAllocator: FileAllocationStrategy =
-    if (hierarchyStore.isDefined && !conf.getBoolean("spark.shuffle.service.enabled", false)) {
+  private[spark] val fileAllocator: FileAllocationStrategy =
+    if (hierarchyStore.isDefined) {
       logInfo(s"Hierarchy allocator for blocks is enabled")
       new HierarchyAllocator
     }
