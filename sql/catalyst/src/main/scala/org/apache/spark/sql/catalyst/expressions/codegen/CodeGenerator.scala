@@ -569,6 +569,8 @@ class CodegenContext {
       addNewFunction(compareFunc, funcCode)
       s"this.$compareFunc($c1, $c2)"
     case schema: StructType =>
+      val (oldVars, oldRow) = (currentVars, INPUT_ROW)
+      currentVars = null
       INPUT_ROW = "i"
       val comparisons = GenerateOrdering.genComparisons(this, schema)
       val compareFunc = freshName("compareStruct")
@@ -585,6 +587,8 @@ class CodegenContext {
             return 0;
           }
         """
+      currentVars = oldVars
+      INPUT_ROW = oldRow
       addNewFunction(compareFunc, funcCode)
       s"this.$compareFunc($c1, $c2)"
     case other if other.isInstanceOf[AtomicType] => s"$c1.compare($c2)"
