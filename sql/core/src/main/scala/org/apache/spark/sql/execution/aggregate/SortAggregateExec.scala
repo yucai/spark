@@ -312,8 +312,35 @@ case class SortAggregateExec(
      """.stripMargin
   }
 
+  private def safeProjection(ctx: CodegenContext, input: Seq[ExprCode]) = {
+    val safeInput = input.zip(child.output).map { e =>
+      val isNull = e._1.isNull
+      val value = e._1.value
+      val dataType = e._2.dataType
+      val codes = if (!ctx.isPrimitiveType(dataType)) {
+        s"""
+           |if (!$isNull)
+           |    ${ctx.setValue(value, dataType, value)};
+         """.stripMargin
+      } else ""
+      ExprCode(codes, isNull, value)
+    }
+    val safeProjectionCodes = evaluateVariables(safeInput)
+    (safeInput, safeProjectionCodes)
+  }
+
   private def doConsumeWithoutKeys(ctx: CodegenContext, input: Seq[ExprCode]): String = {
-    generateCalBufVarsCodes(ctx, input)
+    // safe projection
+    val (safeInput: Seq[ExprCode], safeProjectionCodes: String) = safeProjection(ctx, input)
+    // calculate buffer vars
+    val calBufVarsCodes: String = generateCalBufVarsCodes(ctx, safeInput)
+    s"""
+       |// safe projection
+       |$safeProjectionCodes
+       |
+       |// do aggregation
+       |$calBufVarsCodes
+     """.stripMargin
   }
 
   private def doProduceWithKeys(ctx: CodegenContext): String = {
@@ -337,15 +364,20 @@ case class SortAggregateExec(
   }
 
   def doConsumeWithKeys(ctx: CodegenContext, input: Seq[ExprCode]): String = {
+    // safe projection
+    val (safeInput: Seq[ExprCode], safeProjectionCodes: String) = safeProjection(ctx, input)
     // grouping key
     ctx.INPUT_ROW = null
-    ctx.currentVars = input
+    ctx.currentVars = safeInput
     val groupingExprCode: ExprCode = GenerateUnsafeProjection.createCode(
       ctx, groupingExpressions.map(e => BindReferences.bindReference[Expression](e, child.output)))
     val groupingKey = groupingExprCode.value
     // calculate buffer vars
-    val calBufVarsCodes: String = generateCalBufVarsCodes(ctx, input)
+    val calBufVarsCodes: String = generateCalBufVarsCodes(ctx, safeInput)
    s"""
+       |// safe projection
+       |$safeProjectionCodes
+       |
        |// generate grouping key
        |${groupingExprCode.code.trim}
        |
