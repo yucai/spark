@@ -130,7 +130,7 @@ case class SortAggregateExec(
     if (groupingExpressions.isEmpty) {
       doConsumeWithoutKeys(ctx, input)
     } else {
-      doConsumeWithKeys(ctx, input)
+      doConsumeWithKeys(ctx, input, row)
     }
   }
 
@@ -138,9 +138,7 @@ case class SortAggregateExec(
   // The variables used as aggregation buffer
   private var bufVars: Seq[ExprCode] = _
   private var bufVarsType: Seq[DataType] = _
-  private var currentGroupingKey: String = _
   private val groupingAttributes = groupingExpressions.map(_.toAttribute)
-  private var initBufVarsCodes: String = _
   private var numOutput: String = _
 
   private def generateInitBufVarsCodes(ctx: CodegenContext): String = {
@@ -251,6 +249,23 @@ case class SortAggregateExec(
     }
   }
 
+  private def safeProjection(ctx: CodegenContext, input: Seq[ExprCode]) = {
+    val safeInput = input.zip(child.output).map { e =>
+      val isNull = e._1.isNull
+      val value = e._1.value
+      val dataType = e._2.dataType
+      val codes = if (!ctx.isPrimitiveType(dataType)) {
+        s"""
+           |if (!$isNull)
+           |    ${ctx.setValue(value, dataType, value)};
+         """.stripMargin
+      } else ""
+      ExprCode(e._1.code + codes, isNull, value)
+    }
+    val safeProjectionCodes = evaluateVariables(safeInput)
+    (safeInput, safeProjectionCodes)
+  }
+
   private def doProduceWithoutKeys(ctx: CodegenContext): String = {
     val initAgg = ctx.freshName("initAgg")
     ctx.addMutableState("boolean", initAgg, s"$initAgg = false;")
@@ -312,23 +327,6 @@ case class SortAggregateExec(
      """.stripMargin
   }
 
-  private def safeProjection(ctx: CodegenContext, input: Seq[ExprCode]) = {
-    val safeInput = input.zip(child.output).map { e =>
-      val isNull = e._1.isNull
-      val value = e._1.value
-      val dataType = e._2.dataType
-      val codes = if (!ctx.isPrimitiveType(dataType)) {
-        s"""
-           |if (!$isNull)
-           |    ${ctx.setValue(value, dataType, value)};
-         """.stripMargin
-      } else ""
-      ExprCode(codes, isNull, value)
-    }
-    val safeProjectionCodes = evaluateVariables(safeInput)
-    (safeInput, safeProjectionCodes)
-  }
-
   private def doConsumeWithoutKeys(ctx: CodegenContext, input: Seq[ExprCode]): String = {
     // safe projection
     val (safeInput: Seq[ExprCode], safeProjectionCodes: String) = safeProjection(ctx, input)
@@ -343,66 +341,88 @@ case class SortAggregateExec(
      """.stripMargin
   }
 
+  private var currentGroupingKey: String = _
+  private var nextGroupingKey: String = _
+  private var firstRowInNextGroup: String = _
+  private var sortedInputHasNewGroup: String = _
+  private var processed: String = _
+  private var initBufVarsCodes: String = _
+
   private def doProduceWithKeys(ctx: CodegenContext): String = {
-    // init buffer vars
-    initBufVarsCodes = generateInitBufVarsCodes(ctx)
-    // grouping key
     currentGroupingKey = ctx.freshName("currentGroupingKey")
     ctx.addMutableState("UnsafeRow", currentGroupingKey, s"$currentGroupingKey = null;")
-    numOutput = metricTerm(ctx, "numOutputRows")
+    nextGroupingKey = ctx.freshName("nextGroupingKey")
+    ctx.addMutableState("UnsafeRow", nextGroupingKey, s"$nextGroupingKey = null;")
+    firstRowInNextGroup = ctx.freshName("firstRowInNextGroup")
+    ctx.addMutableState("UnsafeRow", firstRowInNextGroup, s"$firstRowInNextGroup = null;")
+    sortedInputHasNewGroup = ctx.freshName("sortedInputHasNewGroup")
+    ctx.addMutableState("Boolean", sortedInputHasNewGroup, s"$sortedInputHasNewGroup = true;")
+    processed = ctx.freshName("processed")
+    ctx.addMutableState("Boolean", processed, s"$processed = false;")
+    // safe project firstRowInNextGroup
+    ctx.currentVars = null
+    ctx.INPUT_ROW = firstRowInNextGroup
+    val input = child.output.zipWithIndex.map { case (attr, i) =>
+      BoundReference(i, attr.dataType, attr.nullable).genCode(ctx)
+    }
+    val (safeInput: Seq[ExprCode], safeProjectFirstRowInNextGroupCodes: String) =
+      safeProjection(ctx, input)
+
+    initBufVarsCodes = generateInitBufVarsCodes(ctx)
     s"""
-       |${child.asInstanceOf[CodegenSupport].produce(ctx, this)}
-       |// for the last aggregation
-       |if ($currentGroupingKey != null) {
-       |    do {
-       |        $numOutput.add(1);
-       |        ${generateResultCodes(ctx)}
-       |    } while (false);
-       |    $currentGroupingKey = null;
+       |while ($sortedInputHasNewGroup) {
+       |    $sortedInputHasNewGroup = false;
+       |
+       |    // process current sorted group
+       |    ${child.asInstanceOf[CodegenSupport].produce(ctx, this)}
+       |    if (!$processed) return;
+       |
+       |    ${generateResultCodes(ctx)}
+       |
+       |    if ($sortedInputHasNewGroup) {
+       |        $currentGroupingKey = $nextGroupingKey;
+       |        $initBufVarsCodes
+       |        $safeProjectFirstRowInNextGroupCodes
+       |        ${generateCalBufVarsCodes(ctx, safeInput)}
+       |    }
+       |
+       |    if (shouldStop()) return;
        |}
       """.stripMargin
   }
 
-  def doConsumeWithKeys(ctx: CodegenContext, input: Seq[ExprCode]): String = {
-    // safe projection
+  private def doConsumeWithKeys(ctx: CodegenContext,
+                                input: Seq[ExprCode], row: ExprCode): String = {
     val (safeInput: Seq[ExprCode], safeProjectionCodes: String) = safeProjection(ctx, input)
-    // grouping key
     ctx.INPUT_ROW = null
     ctx.currentVars = safeInput
     val groupingExprCode: ExprCode = GenerateUnsafeProjection.createCode(
       ctx, groupingExpressions.map(e => BindReferences.bindReference[Expression](e, child.output)))
     val groupingKey = groupingExprCode.value
-    // calculate buffer vars
-    val calBufVarsCodes: String = generateCalBufVarsCodes(ctx, safeInput)
-   s"""
-       |// safe projection
-       |$safeProjectionCodes
+    s"""
+       |if ($sortedInputHasNewGroup) break;
        |
        |// generate grouping key
-       |${groupingExprCode.code.trim}
+       |$safeProjectionCodes
+       |${groupingExprCode.code}
        |
-       |if ($currentGroupingKey == null) {
+       |// first row from child
+       |if ($processed == false) {
        |    $currentGroupingKey = $groupingKey.copy();
-       |    // init aggregation buffer vars
        |    $initBufVarsCodes
-       |    // do aggregation
-       |    $calBufVarsCodes
+       |    ${generateCalBufVarsCodes(ctx, safeInput)}
+       |    $processed = true;
+       |    continue;
+       |}
+       |
+       |if ($currentGroupingKey.equals($groupingKey)) {
+       |    ${generateCalBufVarsCodes(ctx, safeInput)}
        |    continue;
        |} else {
-       |    if ($currentGroupingKey.equals($groupingKey)) {
-       |        // do aggregation
-       |        $calBufVarsCodes
-       |        continue;
-       |    } else {
-       |        do {
-       |            $numOutput.add(1);
-       |            ${generateResultCodes(ctx)}
-       |        } while (false);
-       |        // new grouping starts
-       |        $currentGroupingKey = $groupingKey.copy();
-       |        $initBufVarsCodes
-       |        $calBufVarsCodes
-       |    }
+       |    $sortedInputHasNewGroup = true;
+       |    $nextGroupingKey = $groupingKey.copy();
+       |    ${row.code}
+       |    $firstRowInNextGroup = ${row.value}.copy();
        |}
      """.stripMargin
   }
