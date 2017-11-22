@@ -27,6 +27,7 @@ import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, ReturnAnswer}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
+import org.apache.spark.sql.execution.adaptive.PlanQueryStage
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec, ShowTablesCommand}
 import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchange}
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
@@ -96,7 +97,11 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
    * row format conversions as needed.
    */
   protected def prepareForExecution(plan: SparkPlan): SparkPlan = {
-    preparations.foldLeft(plan) { case (sp, rule) => rule.apply(sp) }
+    if (sparkSession.sessionState.conf.adaptiveExecutionEnabled) {
+      adaptivePreparations.foldLeft(plan) { case (sp, rule) => rule.apply(sp)}
+    } else {
+      preparations.foldLeft(plan) { case (sp, rule) => rule.apply(sp)}
+    }
   }
 
   /** A sequence of rules that will be applied in order to the physical plan before execution. */
@@ -107,6 +112,13 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     CollapseCodegenStages(sparkSession.sessionState.conf),
     ReuseExchange(sparkSession.sessionState.conf),
     ReuseSubquery(sparkSession.sessionState.conf))
+
+  protected def adaptivePreparations: Seq[Rule[SparkPlan]] = Seq(
+    python.ExtractPythonUDFs,
+    PlanSubqueries(sparkSession),
+    EnsureRequirements(sparkSession.sessionState.conf),
+    ReuseSubquery(sparkSession.sessionState.conf),
+    PlanQueryStage(sparkSession.sessionState.conf))
 
   protected def stringOrError[A](f: => A): String =
     try f.toString catch { case e: AnalysisException => e.toString }

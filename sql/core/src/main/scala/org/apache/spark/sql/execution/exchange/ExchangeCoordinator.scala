@@ -17,15 +17,12 @@
 
 package org.apache.spark.sql.execution.exchange
 
-import java.util.{HashMap => JHashMap, Map => JMap}
-import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.{MapOutputStatistics, ShuffleDependency, SimpleFutureAction}
+import org.apache.spark.MapOutputStatistics
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan}
 
 /**
@@ -83,33 +80,9 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan}
  *  - post-shuffle partition 3: pre-shuffle partition 3 and 4 (size 50 MB)
  */
 class ExchangeCoordinator(
-    numExchanges: Int,
     advisoryTargetPostShuffleInputSize: Long,
     minNumPostShufflePartitions: Option[Int] = None)
   extends Logging {
-
-  // The registered Exchange operators.
-  private[this] val exchanges = ArrayBuffer[ShuffleExchangeExec]()
-
-  // This map is used to lookup the post-shuffle ShuffledRowRDD for an Exchange operator.
-  private[this] val postShuffleRDDs: JMap[ShuffleExchangeExec, ShuffledRowRDD] =
-    new JHashMap[ShuffleExchangeExec, ShuffledRowRDD](numExchanges)
-
-  // A boolean that indicates if this coordinator has made decision on how to shuffle data.
-  // This variable will only be updated by doEstimationIfNecessary, which is protected by
-  // synchronized.
-  @volatile private[this] var estimated: Boolean = false
-
-  /**
-   * Registers a [[ShuffleExchangeExec]] operator to this coordinator. This method is only allowed
-   * to be called in the `doPrepare` method of a [[ShuffleExchangeExec]] operator.
-   */
-  @GuardedBy("this")
-  def registerExchange(exchange: ShuffleExchangeExec): Unit = synchronized {
-    exchanges += exchange
-  }
-
-  def isEstimated: Boolean = estimated
 
   /**
    * Estimates partition start indices for post-shuffle partitions based on
@@ -117,9 +90,6 @@ class ExchangeCoordinator(
    */
   def estimatePartitionStartIndices(
       mapOutputStatistics: Array[MapOutputStatistics]): Array[Int] = {
-    // If we have mapOutputStatistics.length < numExchange, it is because we do not submit
-    // a stage when the number of partitions of this dependency is 0.
-    assert(mapOutputStatistics.length <= numExchanges)
 
     // If minNumPostShufflePartitions is defined, it is possible that we need to use a
     // value less than advisoryTargetPostShuffleInputSize as the target input size of
@@ -186,84 +156,6 @@ class ExchangeCoordinator(
     }
 
     partitionStartIndices.toArray
-  }
-
-  @GuardedBy("this")
-  private def doEstimationIfNecessary(): Unit = synchronized {
-    // It is unlikely that this method will be called from multiple threads
-    // (when multiple threads trigger the execution of THIS physical)
-    // because in common use cases, we will create new physical plan after
-    // users apply operations (e.g. projection) to an existing DataFrame.
-    // However, if it happens, we have synchronized to make sure only one
-    // thread will trigger the job submission.
-    if (!estimated) {
-      // Make sure we have the expected number of registered Exchange operators.
-      assert(exchanges.length == numExchanges)
-
-      val newPostShuffleRDDs = new JHashMap[ShuffleExchangeExec, ShuffledRowRDD](numExchanges)
-
-      // Submit all map stages
-      val shuffleDependencies = ArrayBuffer[ShuffleDependency[Int, InternalRow, InternalRow]]()
-      val submittedStageFutures = ArrayBuffer[SimpleFutureAction[MapOutputStatistics]]()
-      var i = 0
-      while (i < numExchanges) {
-        val exchange = exchanges(i)
-        val shuffleDependency = exchange.prepareShuffleDependency()
-        shuffleDependencies += shuffleDependency
-        if (shuffleDependency.rdd.partitions.length != 0) {
-          // submitMapStage does not accept RDD with 0 partition.
-          // So, we will not submit this dependency.
-          submittedStageFutures +=
-            exchange.sqlContext.sparkContext.submitMapStage(shuffleDependency)
-        }
-        i += 1
-      }
-
-      // Wait for the finishes of those submitted map stages.
-      val mapOutputStatistics = new Array[MapOutputStatistics](submittedStageFutures.length)
-      var j = 0
-      while (j < submittedStageFutures.length) {
-        // This call is a blocking call. If the stage has not finished, we will wait at here.
-        mapOutputStatistics(j) = submittedStageFutures(j).get()
-        j += 1
-      }
-
-      // Now, we estimate partitionStartIndices. partitionStartIndices.length will be the
-      // number of post-shuffle partitions.
-      val partitionStartIndices =
-        if (mapOutputStatistics.length == 0) {
-          None
-        } else {
-          Some(estimatePartitionStartIndices(mapOutputStatistics))
-        }
-
-      var k = 0
-      while (k < numExchanges) {
-        val exchange = exchanges(k)
-        val rdd =
-          exchange.preparePostShuffleRDD(shuffleDependencies(k), partitionStartIndices)
-        newPostShuffleRDDs.put(exchange, rdd)
-
-        k += 1
-      }
-
-      // Finally, we set postShuffleRDDs and estimated.
-      assert(postShuffleRDDs.isEmpty)
-      assert(newPostShuffleRDDs.size() == numExchanges)
-      postShuffleRDDs.putAll(newPostShuffleRDDs)
-      estimated = true
-    }
-  }
-
-  def postShuffleRDD(exchange: ShuffleExchangeExec): ShuffledRowRDD = {
-    doEstimationIfNecessary()
-
-    if (!postShuffleRDDs.containsKey(exchange)) {
-      throw new IllegalStateException(
-        s"The given $exchange is not registered in this coordinator.")
-    }
-
-    postShuffleRDDs.get(exchange)
   }
 
   override def toString: String = {
