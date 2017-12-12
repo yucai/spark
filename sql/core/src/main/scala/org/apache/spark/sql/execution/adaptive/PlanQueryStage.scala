@@ -74,9 +74,6 @@ case class PlanQueryStage(conf: SQLConf) extends Rule[SparkPlan] {
           }
       }
     }
-    newPlan match {
-      case c: ExecutedCommandExec => c
-      case other => ResultQueryStage(other)
-    }
+    ResultQueryStage(newPlan)
   }
 }
