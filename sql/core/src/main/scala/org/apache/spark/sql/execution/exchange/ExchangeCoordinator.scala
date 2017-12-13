@@ -81,7 +81,7 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, SparkPlan}
  */
 class ExchangeCoordinator(
     advisoryTargetPostShuffleInputSize: Long,
-    minNumPostShufflePartitions: Option[Int] = None)
+    minNumPostShufflePartitions: Int = 1)
   extends Logging {
 
   /**
@@ -94,19 +94,15 @@ class ExchangeCoordinator(
     // If minNumPostShufflePartitions is defined, it is possible that we need to use a
     // value less than advisoryTargetPostShuffleInputSize as the target input size of
     // a post shuffle task.
-    val targetPostShuffleInputSize = minNumPostShufflePartitions match {
-      case Some(numPartitions) =>
-        val totalPostShuffleInputSize = mapOutputStatistics.map(_.bytesByPartitionId.sum).sum
-        // The max at here is to make sure that when we have an empty table, we
-        // only have a single post-shuffle partition.
-        // There is no particular reason that we pick 16. We just need a number to
-        // prevent maxPostShuffleInputSize from being set to 0.
-        val maxPostShuffleInputSize =
-          math.max(math.ceil(totalPostShuffleInputSize / numPartitions.toDouble).toLong, 16)
-        math.min(maxPostShuffleInputSize, advisoryTargetPostShuffleInputSize)
-
-      case None => advisoryTargetPostShuffleInputSize
-    }
+    val totalPostShuffleInputSize = mapOutputStatistics.map(_.bytesByPartitionId.sum).sum
+    // The max at here is to make sure that when we have an empty table, we
+    // only have a single post-shuffle partition.
+    // There is no particular reason that we pick 16. We just need a number to
+    // prevent maxPostShuffleInputSize from being set to 0.
+    val maxPostShuffleInputSize = math.max(
+      math.ceil(totalPostShuffleInputSize / minNumPostShufflePartitions.toDouble).toLong, 16)
+    val targetPostShuffleInputSize =
+      math.min(maxPostShuffleInputSize, advisoryTargetPostShuffleInputSize)
 
     logInfo(
       s"advisoryTargetPostShuffleInputSize: $advisoryTargetPostShuffleInputSize, " +
