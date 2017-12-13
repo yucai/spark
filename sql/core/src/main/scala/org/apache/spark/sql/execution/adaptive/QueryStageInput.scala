@@ -25,7 +25,9 @@ import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partition
 import org.apache.spark.sql.execution._
 
 /**
- * QueryStageInput is the leaf node of a QueryStage and is used to hide its child stage.
+ * QueryStageInput is the leaf node of a QueryStage and is used to hide its child stage. It gets
+ * the result of its child stage and serves it as the input of the QueryStage. A QueryStage knows
+ * its child stages by collecting all the QueryStageInputs.
  */
 abstract class QueryStageInput extends LeafExecNode {
 
@@ -34,8 +36,9 @@ abstract class QueryStageInput extends LeafExecNode {
   // Ignore this wrapper for canonicalizing.
   override def doCanonicalize(): SparkPlan = childStage.canonicalized
 
-  // `QueryStageInput` can have distinct set of output attribute ids from its childStage, we need
-  // to update the attribute ids in `outputPartitioning` and `outputOrdering`.
+  // Similar to ReusedExchangeExec, two QueryStageInputs can reference to the same childStage.
+  // QueryStageInput can have distinct set of output attribute ids from its childStage, we need
+  // to update the attribute ids in outputPartitioning and outputOrdering.
   private lazy val updateAttr: Expression => Expression = {
     val originalAttrToNewAttr = AttributeMap(childStage.output.zip(output))
     e => e.transform {
@@ -63,7 +66,12 @@ abstract class QueryStageInput extends LeafExecNode {
   }
 }
 
-/** A QueryStageInput whose child stage is a ShuffleQueryStage. */
+/**
+ * A QueryStageInput whose child stage is a ShuffleQueryStage. It returns a new ShuffledRowRDD
+ * based on the the child stage's result RDD and the specified partitionStartIndices. If the
+ * child stage is reused by another ShuffleQueryStageInput, they can return RDDs with different
+ * partitionStartIndices.
+ */
 case class ShuffleQueryStageInput(
     childStage: ShuffleQueryStage,
     override val output: Seq[Attribute],

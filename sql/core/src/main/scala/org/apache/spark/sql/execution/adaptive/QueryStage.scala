@@ -17,7 +17,6 @@
 
 package org.apache.spark.sql.execution.adaptive
 
-import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.Duration
 
@@ -33,7 +32,7 @@ import org.apache.spark.util.ThreadUtils
 
 /**
  * In adaptive execution mode, an execution plan is divided into multiple QueryStages. Each
- * QueryStage is a sub tree that runs in a single stage.
+ * QueryStage is a sub-tree that runs in a single stage.
  */
 abstract class QueryStage extends UnaryExecNode {
 
@@ -86,9 +85,9 @@ abstract class QueryStage extends UnaryExecNode {
    * we do a codegen for this query stage and update the UI with the new plan.
    */
   def prepareExecuteStage(): Unit = {
-    // 1. Execute childStages and optimize the plan in this stage.
+    // 1. Execute childStages
     executeChildStages()
-    // It is possible to optimize this stage's plan here based on child stages' statistics.
+    // It is possible to optimize this stage's plan here based on the child stages' statistics.
 
     // 2. Determine reducer number
     val queryStageInputs: Seq[ShuffleQueryStageInput] = child.collect {
