@@ -103,7 +103,10 @@ abstract class QueryStage extends UnaryExecNode {
 
       val partitionStartIndices =
         exchangeCoordinator.estimatePartitionStartIndices(childMapOutputStatistics)
-      queryStageInputs.foreach(_.partitionStartIndices = Some(partitionStartIndices))
+      child = child.transform {
+        case ShuffleQueryStageInput(childStage, output, _) =>
+          ShuffleQueryStageInput(childStage, output, Some(partitionStartIndices))
+      }
     }
 
     // 3. Codegen and update the UI
