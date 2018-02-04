@@ -510,6 +510,7 @@ private[spark] class MapOutputTrackerMaster(
    * Return statistics about all of the outputs for a given shuffle.
    */
   def getStatistics(dep: ShuffleDependency[_, _, _]): MapOutputStatistics = {
+    val beforeCalculate = System.nanoTime()
     shuffleStatuses(dep.shuffleId).withMapStatuses { statuses =>
       val totalSizes = new Array[Long](dep.partitioner.numPartitions)
       val parallelAggThreshold = conf.get(
@@ -539,6 +540,8 @@ private[spark] class MapOutputTrackerMaster(
           threadPool.shutdown()
         }
       }
+      val afterCalculate = System.nanoTime()
+      logWarning("getStatistics costs " +  (afterCalculate - beforeCalculate) / 1000000 + "ms")
       new MapOutputStatistics(dep.shuffleId, totalSizes)
     }
   }
