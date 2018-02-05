@@ -38,8 +38,7 @@ import org.apache.spark.util.MutablePair
  */
 case class ShuffleExchangeExec(
     var newPartitioning: Partitioning,
-    child: SparkPlan,
-    @transient coordinator: Option[ExchangeCoordinator]) extends Exchange {
+    child: SparkPlan) extends Exchange {
 
   // NOTE: coordinator can be null after serialization/deserialization,
   //       e.g. it can be null on the Executor side
@@ -48,14 +47,7 @@ case class ShuffleExchangeExec(
     "dataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size"))
 
   override def nodeName: String = {
-    val extraInfo = coordinator match {
-      case Some(exchangeCoordinator) =>
-        s"(coordinator id: ${System.identityHashCode(exchangeCoordinator)})"
-      case _ => ""
-    }
-
-    val simpleNodeName = "Exchange"
-    s"$simpleNodeName$extraInfo"
+    "Exchange"
   }
 
   override def outputPartitioning: Partitioning = newPartitioning
@@ -127,10 +119,6 @@ case class ShuffleExchangeExec(
 }
 
 object ShuffleExchangeExec {
-  def apply(newPartitioning: Partitioning, child: SparkPlan): ShuffleExchangeExec = {
-    ShuffleExchangeExec(newPartitioning, child, coordinator = Option.empty[ExchangeCoordinator])
-  }
-
   /**
    * Determines whether records must be defensively copied before being sent to the shuffle.
    * Several of Spark's shuffle components will buffer deserialized Java objects in memory. The
