@@ -18,13 +18,14 @@
 package org.apache.spark.shuffle
 
 import java.io._
+import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.nio.file.Files
 
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.internal.Logging
 import org.apache.spark.io.NioBufferedFileInputStream
-import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
+import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.netty.SparkTransportConf
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
 import org.apache.spark.storage._
@@ -218,6 +219,56 @@ private[spark] class IndexShuffleBlockResolver(
         getDataFile(blockId.shuffleId, blockId.mapId),
         offset,
         nextOffset - offset)
+    } finally {
+      in.close()
+    }
+  }
+
+  override def getBlockData(blockId: ContinuousShuffleBlockId): Seq[ManagedBuffer] = {
+    logDebug(s"fetch shuffle blocks: $blockId")
+    // The block is actually going to be a range of a single map output file for this map, so
+    // find out the consolidated file, then the offset within that from our index
+    val indexFile = getIndexFile(blockId.shuffleId, blockId.mapId)
+
+    // SPARK-22982: if this FileInputStream's position is seeked forward by another piece of code
+    // which is incorrectly using our file descriptor then this code will fetch the wrong offsets
+    // (which may cause a reducer to be sent a different reducer's data). The explicit position
+    // checks added here were a useful debugging aid during SPARK-22982 and may help prevent this
+    // class of issue from re-occurring in the future which is why they are left here even though
+    // SPARK-22982 is fixed.
+    val channel = Files.newByteChannel(indexFile.toPath)
+    val in = new DataInputStream(Channels.newInputStream(channel))
+    val blockIndices = Array.ofDim[Long](blockId.numBlocks + 1)
+    try {
+      channel.position(blockId.reduceId * 8L)
+      (0 until blockId.numBlocks + 1).foreach(i => blockIndices(i) = in.readLong())
+      val expectedPosition = (blockId.reduceId + blockId.numBlocks + 1) * 8
+      val actualPosition = channel.position()
+      if (actualPosition != expectedPosition) {
+        throw new Exception(s"SPARK-22982: Incorrect channel position after index file reads: " +
+          s"expected $expectedPosition but actual position was $actualPosition.")
+      }
+
+      val blockLengths =
+        (0 until blockId.numBlocks).map(i => blockIndices(i + 1) - blockIndices(i))
+      val dataFile = getDataFile(blockId.shuffleId, blockId.mapId)
+      val dataChannel = new RandomAccessFile(dataFile, "r").getChannel
+      val length = blockIndices.last - blockIndices.head
+      val dataBuf = ByteBuffer.allocate(length.toInt)
+      dataChannel.position(blockIndices.head)
+      while (dataBuf.remaining() != 0) {
+        if (dataChannel.read(dataBuf) == -1) {
+          throw new IOException(s"Reached EOF before filling buffer\n" +
+            s"offset=${blockIndices.head}\nfile=${dataFile.getAbsoluteFile}\n" +
+            s"buf.remaining=${dataBuf.remaining()}")
+        }
+      }
+      dataChannel.close()
+      val data = dataBuf.array()
+      (0 until blockId.numBlocks).map(i =>
+        new NioManagedBuffer(
+          ByteBuffer.wrap(data,
+            (blockIndices(i) - blockIndices.head).toInt, blockLengths(i).toInt)))
     } finally {
       in.close()
     }
