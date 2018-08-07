@@ -392,6 +392,10 @@ private[spark] class BlockManager(
     }
   }
 
+  override def getBlockData(blockId: ContinuousShuffleBlockId): Seq[ManagedBuffer] = {
+    shuffleManager.shuffleBlockResolver.getBlockData(blockId)
+  }
+
   /**
    * Put the block locally, using the given storage level.
    *
