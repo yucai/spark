@@ -231,7 +231,7 @@ final class ShuffleBlockFetcherIterator(
             // This needs to be released after use.
             buf.retain()
             remainingBlocks -= blockId
-            results.put(new SuccessFetchResult(BlockId(blockId), address, sizeMap(blockId), buf,
+            results.put(new SuccessFetchResult(BlockId(blockId), address, buf.size(), buf,
               remainingBlocks.isEmpty))
             logDebug("remainingBlocks: " + remainingBlocks)
           }
@@ -293,11 +293,14 @@ final class ShuffleBlockFetcherIterator(
           } else {
             curBlocks += ((blockId, size))
             remoteBlocks += blockId
-            numBlocksToFetch += 1
             curRequestSize += size
           }
           if (curRequestSize >= targetRequestSize ||
               curBlocks.size >= maxBlocksInFlightPerAddress) {
+            numBlocksToFetch += curBlocks.map { x =>
+              val block = x._1.asInstanceOf[ShuffleBlockId]
+              block.mapId
+            }.distinct.size
             // Add this FetchRequest
             remoteRequests += new FetchRequest(address, curBlocks)
             logDebug(s"Creating fetch request of $curRequestSize at $address "
@@ -308,6 +311,10 @@ final class ShuffleBlockFetcherIterator(
         }
         // Add in the final request
         if (curBlocks.nonEmpty) {
+          numBlocksToFetch += curBlocks.map { x =>
+            val block = x._1.asInstanceOf[ShuffleBlockId]
+            block.mapId
+          }.distinct.size
           remoteRequests += new FetchRequest(address, curBlocks)
         }
       }
@@ -367,7 +374,10 @@ final class ShuffleBlockFetcherIterator(
     logDebug("Got local blocks in " + Utils.getUsedTimeMs(startTime))
   }
 
-  override def hasNext: Boolean = numBlocksProcessed < numBlocksToFetch
+  override def hasNext: Boolean = {
+    logDebug(s"numBlocksProcessed: $numBlocksProcessed, numBlocksToFetch: $numBlocksToFetch")
+    numBlocksProcessed < numBlocksToFetch
+  }
 
   /**
    * Fetches the next (BlockId, InputStream). If a task fails, the ManagedBuffers
@@ -465,9 +475,7 @@ final class ShuffleBlockFetcherIterator(
                   throwFetchFailedException(blockId, address, e)
                 } else {
                   logWarning(s"got an corrupted block $blockId from $address, fetch again", e)
-                  corruptedBlocks += blockId
-                  fetchRequests += FetchRequest(address, Array((blockId, size)))
-                  result = null
+                  throwFetchFailedException(blockId, address, e)
                 }
             } finally {
               // TODO: release the buf here to free memory earlier

@@ -20,7 +20,7 @@ package org.apache.spark.network
 import scala.reflect.ClassTag
 
 import org.apache.spark.network.buffer.ManagedBuffer
-import org.apache.spark.storage.{BlockId, StorageLevel}
+import org.apache.spark.storage.{BlockId, ContinuousShuffleBlockId, StorageLevel}
 
 private[spark]
 trait BlockDataManager {
@@ -30,6 +30,9 @@ trait BlockDataManager {
    * cannot be read successfully.
    */
   def getBlockData(blockId: BlockId): ManagedBuffer
+
+  def getBlockData(blockId: ContinuousShuffleBlockId): ManagedBuffer
+
 
   /**
    * Put the block locally, using the given storage level.
