@@ -80,5 +80,23 @@ object WideTableBenchmark extends SqlBasedBenchmark {
       }
       benchmark.run()
     }
+
+    runBenchmark("projection on wide table: complex expressions 2") {
+      val N = 1 << 20
+      val df = spark.range(N)
+      val tmp = (0 until 6).map(i => s"when id = ${N + i}L then 1")
+      val expr = s"case ${tmp.mkString(" ")} else sqrt($N) end"
+      val columns = (0 until 400).map{ i => s"$expr as id$i" }
+      val benchmark =
+        new Benchmark("projection on wide table: complex expressions 2", N, output = output)
+      Seq("10", "100", "1024", "2048", "4096", "8196", "65536").foreach { n =>
+        benchmark.addCase(s"split threshold $n", numIters = 5) { iter =>
+          withSQLConf("spark.sql.codegen.methodSplitThreshold" -> n) {
+            df.selectExpr(columns: _*).foreach(identity(_))
+          }
+        }
+      }
+      benchmark.run()
+    }
   }
 }
